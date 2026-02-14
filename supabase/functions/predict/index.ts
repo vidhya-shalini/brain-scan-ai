@@ -5,6 +5,85 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+async function callAI(lovableApiKey: string, imageUrl: string, attempt = 1): Promise<any> {
+  const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${lovableApiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "google/gemini-2.5-flash",
+      messages: [
+        {
+          role: "system",
+          content: `You are a medical AI specialized in brain MRI tumor detection. Analyze the MRI image and respond with ONLY valid JSON (no markdown):
+{
+  "tumor_present": boolean,
+  "tumor_type": "Glioma" | "Meningioma" | "Pituitary" | "NoTumor",
+  "confidence": number (0-1),
+  "probabilities": { "Glioma": number, "Meningioma": number, "Pituitary": number, "NoTumor": number },
+  "analysis": "brief description"
+}
+Probabilities must sum to ~1.0. Each value must be between 0 and 1.`,
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Analyze this brain MRI scan for tumor detection." },
+            { type: "image_url", image_url: { url: imageUrl } },
+          ],
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error("AI gateway error:", response.status, errText);
+    throw new Error(`AI analysis failed: ${response.status}`);
+  }
+
+  const aiResult = await response.json();
+  const rawContent = aiResult.choices?.[0]?.message?.content || "";
+
+  let cleaned = rawContent.trim();
+  if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
+  }
+
+  try {
+    const parsed = JSON.parse(cleaned);
+    // Validate and clamp probabilities
+    if (parsed.probabilities) {
+      for (const key of Object.keys(parsed.probabilities)) {
+        parsed.probabilities[key] = Math.max(0, Math.min(1, parsed.probabilities[key] || 0));
+      }
+      const sum = Object.values(parsed.probabilities).reduce((a: number, b: any) => a + b, 0) as number;
+      if (sum > 0) {
+        for (const key of Object.keys(parsed.probabilities)) {
+          parsed.probabilities[key] = parsed.probabilities[key] / sum;
+        }
+      }
+    }
+    parsed.confidence = Math.max(0, Math.min(1, parsed.confidence || 0.5));
+    return parsed;
+  } catch {
+    if (attempt < 2) {
+      console.warn("JSON parse failed, retrying...");
+      return callAI(lovableApiKey, imageUrl, attempt + 1);
+    }
+    console.error("Failed to parse AI response after retry:", rawContent);
+    return {
+      tumor_present: false,
+      tumor_type: "NoTumor",
+      confidence: 0.5,
+      probabilities: { Glioma: 0.1, Meningioma: 0.1, Pituitary: 0.1, NoTumor: 0.7 },
+      analysis: "Unable to parse AI response.",
+    };
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -15,9 +94,7 @@ Deno.serve(async (req) => {
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
 
-    if (!lovableApiKey) {
-      throw new Error("LOVABLE_API_KEY not configured");
-    }
+    if (!lovableApiKey) throw new Error("LOVABLE_API_KEY not configured");
 
     const supabase = createClient(supabaseUrl, supabaseKey);
     const { case_id, patient_id, image_urls } = await req.json();
@@ -29,81 +106,9 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Use Lovable AI (Gemini) to analyze the MRI image
-    const imageContent = image_urls.map((url: string) => ({
-      type: "image_url",
-      image_url: { url },
-    }));
-
-    const aiResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${lovableApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "google/gemini-2.5-pro",
-        messages: [
-          {
-            role: "system",
-            content: `You are a medical AI assistant specialized in brain MRI analysis for tumor detection. Analyze the provided MRI brain scan image(s) and determine if a tumor is present.
-
-You MUST respond with ONLY a valid JSON object (no markdown, no code fences) with these exact fields:
-{
-  "tumor_present": boolean,
-  "tumor_type": "Glioma" | "Meningioma" | "Pituitary" | "NoTumor",
-  "confidence": number between 0 and 1,
-  "probabilities": {
-    "Glioma": number,
-    "Meningioma": number,
-    "Pituitary": number,
-    "NoTumor": number
-  },
-  "analysis": "Brief description of findings"
-}
-
-The probabilities must sum to approximately 1.0. Be thorough but respond only with the JSON.`,
-          },
-          {
-            role: "user",
-            content: [
-              { type: "text", text: "Analyze this brain MRI scan for tumor detection. Provide your assessment as the specified JSON format." },
-              ...imageContent,
-            ],
-          },
-        ],
-      }),
-    });
-
-    if (!aiResponse.ok) {
-      const errText = await aiResponse.text();
-      console.error("AI gateway error:", aiResponse.status, errText);
-      throw new Error(`AI analysis failed: ${aiResponse.status}`);
-    }
-
-    const aiResult = await aiResponse.json();
-    const rawContent = aiResult.choices?.[0]?.message?.content || "";
-    
-    // Parse the JSON from the AI response (strip markdown fences if present)
-    let cleaned = rawContent.trim();
-    if (cleaned.startsWith("```")) {
-      cleaned = cleaned.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
-    }
-    
-    let result: any;
-    try {
-      result = JSON.parse(cleaned);
-    } catch {
-      console.error("Failed to parse AI response:", rawContent);
-      // Fallback
-      result = {
-        tumor_present: false,
-        tumor_type: "NoTumor",
-        confidence: 0.5,
-        probabilities: { Glioma: 0.1, Meningioma: 0.1, Pituitary: 0.1, NoTumor: 0.7 },
-        analysis: "Unable to parse AI response. Please try again.",
-      };
-    }
+    // Use only the last (latest) image for speed
+    const latestUrl = image_urls[image_urls.length - 1];
+    const result = await callAI(lovableApiKey, latestUrl);
 
     // Compute severity
     let severity_level = "GREEN";
@@ -136,7 +141,7 @@ The probabilities must sum to approximately 1.0. Be thorough but respond only wi
 
     if (predError) throw predError;
 
-    // Save metrics from AI confidence
+    // Save metrics
     const conf = result.confidence ?? 0.5;
     await supabase.from("metrics").insert({
       prediction_id: prediction.id,
