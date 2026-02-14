@@ -8,35 +8,26 @@ import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
 
 const severityOrder = { RED: 0, YELLOW: 1, GREEN: 2 };
+const severityMap: Record<string, { label: string; className: string }> = {
+  RED: { label: "SEVERE", className: "bg-[hsl(var(--severity-red))] hover:bg-[hsl(var(--severity-red))]/80 text-white" },
+  YELLOW: { label: "MEDIUM", className: "bg-[hsl(var(--severity-yellow))] hover:bg-[hsl(var(--severity-yellow))]/80 text-black" },
+  GREEN: { label: "MILD", className: "bg-[hsl(var(--severity-green))] hover:bg-[hsl(var(--severity-green))]/80 text-white" },
+};
 
 const QueueOrder = () => {
   const { data: queueData } = useQuery({
     queryKey: ["queue"],
     queryFn: async () => {
       const { data, error } = await supabase
-        .from("predictions")
-        .select("*, patients(*)")
-        .order("created_at", { ascending: false });
+        .from("predictions").select("*, patients(*)").order("created_at", { ascending: false });
       if (error) throw error;
-      return data
-        ?.sort((a, b) => {
-          const sDiff = severityOrder[a.severity_level] - severityOrder[b.severity_level];
-          if (sDiff !== 0) return sDiff;
-          return (a.queue_rank ?? 999) - (b.queue_rank ?? 999);
-        });
+      return data?.sort((a, b) => {
+        const sDiff = severityOrder[a.severity_level] - severityOrder[b.severity_level];
+        if (sDiff !== 0) return sDiff;
+        return (a.queue_rank ?? 999) - (b.queue_rank ?? 999);
+      });
     },
   });
-
-  const SeverityBadge = ({ level }: { level: string }) => (
-    <Badge className={cn(
-      "font-bold",
-      level === "RED" && "bg-[hsl(var(--severity-red))] hover:bg-[hsl(var(--severity-red))]/80 text-white",
-      level === "YELLOW" && "bg-[hsl(var(--severity-yellow))] hover:bg-[hsl(var(--severity-yellow))]/80 text-black",
-      level === "GREEN" && "bg-[hsl(var(--severity-green))] hover:bg-[hsl(var(--severity-green))]/80 text-white",
-    )}>
-      {level}
-    </Badge>
-  );
 
   return (
     <DashboardLayout>
@@ -76,7 +67,11 @@ const QueueOrder = () => {
                     <TableCell>{item.patients?.seizure ? "Yes" : "No"}</TableCell>
                     <TableCell>{item.patients?.headache_severity}</TableCell>
                     <TableCell><Badge variant="outline">{item.tumor_type}</Badge></TableCell>
-                    <TableCell><SeverityBadge level={item.severity_level} /></TableCell>
+                    <TableCell>
+                      <Badge className={cn("font-bold", severityMap[item.severity_level]?.className)}>
+                        {severityMap[item.severity_level]?.label ?? item.severity_level}
+                      </Badge>
+                    </TableCell>
                   </TableRow>
                 ))}
                 {(!queueData || queueData.length === 0) && (
