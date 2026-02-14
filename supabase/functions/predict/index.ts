@@ -54,7 +54,6 @@ Probabilities must sum to ~1.0. Each value must be between 0 and 1.`,
 
   try {
     const parsed = JSON.parse(cleaned);
-    // Validate and clamp probabilities
     if (parsed.probabilities) {
       for (const key of Object.keys(parsed.probabilities)) {
         parsed.probabilities[key] = Math.max(0, Math.min(1, parsed.probabilities[key] || 0));
@@ -84,6 +83,54 @@ Probabilities must sum to ~1.0. Each value must be between 0 and 1.`,
   }
 }
 
+async function generateGradcam(lovableApiKey: string, imageUrl: string, tumorType: string): Promise<string | null> {
+  try {
+    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${lovableApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "google/gemini-2.5-flash-image",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: `This is a brain MRI scan with a ${tumorType} tumor detected. Create a Grad-CAM style heatmap overlay on this MRI image. The tumor region should be highlighted with a red-yellow heatmap overlay (red = highest activation, yellow = moderate, blue/transparent = low). Keep the original MRI visible underneath the semi-transparent heatmap. The result should look like a professional Grad-CAM visualization used in medical AI.`,
+              },
+              {
+                type: "image_url",
+                image_url: { url: imageUrl },
+              },
+            ],
+          },
+        ],
+        modalities: ["image", "text"],
+      }),
+    });
+
+    if (!response.ok) {
+      console.error("Grad-CAM generation failed:", response.status);
+      return null;
+    }
+
+    const data = await response.json();
+    const base64Url = data.choices?.[0]?.message?.images?.[0]?.image_url?.url;
+    if (!base64Url) {
+      console.warn("No image in Grad-CAM response");
+      return null;
+    }
+
+    return base64Url;
+  } catch (e) {
+    console.error("Grad-CAM generation error:", e);
+    return null;
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -106,11 +153,9 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Use only the last (latest) image for speed
     const latestUrl = image_urls[image_urls.length - 1];
     const result = await callAI(lovableApiKey, latestUrl);
 
-    // Compute severity
     let severity_level = "GREEN";
     if (result.tumor_present && (result.tumor_type === "Glioma" || result.tumor_type === "Meningioma")) {
       severity_level = "RED";
@@ -118,14 +163,42 @@ Deno.serve(async (req) => {
       severity_level = "YELLOW";
     }
 
-    // Compute queue rank
     const { count } = await supabase
       .from("predictions")
       .select("*", { count: "exact", head: true })
       .eq("severity_level", severity_level);
     const queue_rank = (count ?? 0) + 1;
 
-    // Save prediction
+    // Generate Grad-CAM heatmap if tumor is present
+    let gradcam_path: string | null = null;
+    if (result.tumor_present && result.tumor_type !== "NoTumor") {
+      const gradcamBase64 = await generateGradcam(lovableApiKey, latestUrl, result.tumor_type);
+      if (gradcamBase64) {
+        try {
+          // Convert base64 data URL to binary
+          const base64Data = gradcamBase64.split(",")[1];
+          const binaryString = atob(base64Data);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+
+          gradcam_path = `${patient_id}/gradcam_${Date.now()}.png`;
+          const { error: uploadErr } = await supabase.storage
+            .from("gradcam_images")
+            .upload(gradcam_path, bytes, { contentType: "image/png", upsert: true });
+
+          if (uploadErr) {
+            console.error("Grad-CAM upload error:", uploadErr);
+            gradcam_path = null;
+          }
+        } catch (e) {
+          console.error("Grad-CAM processing error:", e);
+          gradcam_path = null;
+        }
+      }
+    }
+
     const { data: prediction, error: predError } = await supabase
       .from("predictions")
       .insert({
@@ -135,13 +208,13 @@ Deno.serve(async (req) => {
         probabilities: result.probabilities ?? {},
         severity_level,
         queue_rank,
+        gradcam_path,
       })
       .select()
       .single();
 
     if (predError) throw predError;
 
-    // Save metrics
     const conf = result.confidence ?? 0.5;
     await supabase.from("metrics").insert({
       prediction_id: prediction.id,
