@@ -179,6 +179,7 @@ export type Database = {
       }
       predictions: {
         Row: {
+          baseline_probabilities: Json | null
           created_at: string
           gradcam_path: string | null
           id: string
@@ -190,6 +191,7 @@ export type Database = {
           tumor_type: Database["public"]["Enums"]["tumor_type"]
         }
         Insert: {
+          baseline_probabilities?: Json | null
           created_at?: string
           gradcam_path?: string | null
           id?: string
@@ -201,6 +203,7 @@ export type Database = {
           tumor_type?: Database["public"]["Enums"]["tumor_type"]
         }
         Update: {
+          baseline_probabilities?: Json | null
           created_at?: string
           gradcam_path?: string | null
           id?: string
