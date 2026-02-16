@@ -207,10 +207,7 @@ const Results = () => {
       for (const [cls, prob] of Object.entries(probs)) {
         const pct = (prob * 100).toFixed(1);
         pdf.text(`  ${cls}: ${pct}%`, 15, y);
-        // Draw bar
-        pdf.setFillColor(cls === pred.tumor_type ? 0 : 180, cls === pred.tumor_type ? 136 : 180, cls === pred.tumor_type ? 204 : 180);
-        pdf.rect(65, y - 3, prob * 80, 4, "F");
-        y += 6;
+        y += 5;
       }
 
       y += 4;
@@ -236,33 +233,33 @@ const Results = () => {
 
       // Images section
       if (mriBase64 || gradcamBase64) {
-        if (y > 200) { pdf.addPage(); y = 15; }
+        // Keep single page - use smaller images if running low on space
+        const scanImgSize = y > 200 ? 40 : 50;
         pdf.setFont("helvetica", "bold");
         pdf.setFontSize(11);
         pdf.text("Scan Images", 15, y); y += 6;
 
-        const imgSize = 55;
+        const imgDim = scanImgSize;
         if (mriBase64) {
           try {
-            pdf.addImage(mriBase64, "JPEG", 15, y, imgSize, imgSize);
+            pdf.addImage(mriBase64, "JPEG", 15, y, imgDim, imgDim);
             pdf.setFontSize(8);
             pdf.setFont("helvetica", "normal");
-            pdf.text("Original MRI", 15 + imgSize / 2, y + imgSize + 5, { align: "center" });
+            pdf.text("Original MRI", 15 + imgDim / 2, y + imgDim + 5, { align: "center" });
           } catch { /* image add failed */ }
         }
         if (gradcamBase64) {
           try {
-            pdf.addImage(gradcamBase64, "PNG", mriBase64 ? 85 : 15, y, imgSize, imgSize);
+            pdf.addImage(gradcamBase64, "PNG", mriBase64 ? 85 : 15, y, imgDim, imgDim);
             pdf.setFontSize(8);
             pdf.setFont("helvetica", "normal");
-            pdf.text("Grad-CAM Heatmap", (mriBase64 ? 85 : 15) + imgSize / 2, y + imgSize + 5, { align: "center" });
+            pdf.text("Grad-CAM Heatmap", (mriBase64 ? 85 : 15) + imgDim / 2, y + imgDim + 5, { align: "center" });
           } catch { /* image add failed */ }
         }
-        y += imgSize + 12;
+        y += imgDim + 12;
       }
 
       // Footer
-      if (y > 250) { pdf.addPage(); y = 15; }
       pdf.setDrawColor(0, 136, 204);
       pdf.setLineWidth(0.3);
       pdf.line(10, y, w - 10, y);
